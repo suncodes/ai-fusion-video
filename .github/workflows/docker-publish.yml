@@ -2,6 +2,8 @@ name: Publish Docker Images
 
 on:
   push:
+    branches:
+      - '**'      # 任意分支提交后触发构建
     tags:
       - '[0-9]*'   # 匹配 0.2.0、1.0.0、1.0.0-alpha 等版本标签
       - 'v[0-9]*'  # 匹配 v1.0.0、v1.0.0-alpha 等版本标签
@@ -49,16 +51,48 @@ jobs:
           mkdir -p docker-build
           cp "$JAR_PATH" docker-build/app.jar
 
-      # Docker 镜像版本去掉可选的 v 前缀
+      # tag 发布使用版本号；分支提交使用 branch-shortsha，避免分支名包含 / 时生成非法 Docker tag。
       - name: Extract version
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            SAFE_REF=$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+//; s/-+$//')
+            VERSION="${SAFE_REF}-${GITHUB_SHA::7}"
+          fi
+
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image names
         id: images
         run: |
           echo "backend=${REGISTRY}/${IMAGE_NAMESPACE}/${BACKEND_IMAGE_NAME}" >> $GITHUB_OUTPUT
           echo "frontend=${REGISTRY}/${IMAGE_NAMESPACE}/${FRONTEND_IMAGE_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Resolve image tags
+        id: image_tags
+        shell: bash
+        run: |
+          BACKEND_IMAGE="${{ steps.images.outputs.backend }}"
+          FRONTEND_IMAGE="${{ steps.images.outputs.frontend }}"
+
+          {
+            echo "backend<<EOF"
+            echo "${BACKEND_IMAGE}:${{ steps.version.outputs.VERSION }}"
+            if [ "${GITHUB_REF_TYPE}" = "tag" ] || [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "master" ]; then
+              echo "${BACKEND_IMAGE}:latest"
+            fi
+            echo "EOF"
+
+            echo "frontend<<EOF"
+            echo "${FRONTEND_IMAGE}:${{ steps.version.outputs.VERSION }}"
+            if [ "${GITHUB_REF_TYPE}" = "tag" ] || [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "master" ]; then
+              echo "${FRONTEND_IMAGE}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -80,9 +114,7 @@ jobs:
           context: ./ai-fusion-video/docker-build
           platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: |
-            ${{ steps.images.outputs.backend }}:${{ steps.version.outputs.VERSION }}
-            ${{ steps.images.outputs.backend }}:latest
+          tags: ${{ steps.image_tags.outputs.backend }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
@@ -93,8 +125,6 @@ jobs:
           context: ./ai-fusion-video-web
           platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: |
-            ${{ steps.images.outputs.frontend }}:${{ steps.version.outputs.VERSION }}
-            ${{ steps.images.outputs.frontend }}:latest
+          tags: ${{ steps.image_tags.outputs.frontend }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
