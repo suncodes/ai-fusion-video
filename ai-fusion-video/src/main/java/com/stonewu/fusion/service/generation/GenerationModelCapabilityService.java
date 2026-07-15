@@ -6,11 +6,11 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.stonewu.fusion.common.BusinessException;
 import com.stonewu.fusion.entity.ai.AiModel;
-import com.stonewu.fusion.service.ai.model.AiModelMetadata;
-import com.stonewu.fusion.service.ai.model.AiModelMetadataResolver;
 import com.stonewu.fusion.entity.generation.ImageTask;
 import com.stonewu.fusion.entity.generation.VideoTask;
 import com.stonewu.fusion.service.ai.ModelPresetService;
+import com.stonewu.fusion.service.ai.model.AiModelMetadata;
+import com.stonewu.fusion.service.ai.model.AiModelMetadataResolver;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -55,7 +55,11 @@ public class GenerationModelCapabilityService {
             finalMaxReferenceImages = 0;
         }
 
-        return new ImageModelCapability(finalSupportsReferenceImages, finalMinReferenceImages, finalMaxReferenceImages);
+        return new ImageModelCapability(
+                finalSupportsReferenceImages,
+                finalMinReferenceImages,
+                finalMaxReferenceImages
+        );
     }
 
     public VideoModelCapability resolveVideoCapability(AiModel model) {
@@ -83,6 +87,8 @@ public class GenerationModelCapabilityService {
         Integer maxReferenceImages = getInteger(config, "maxReferenceImages", "maxRefImages");
         Integer maxReferenceVideos = getInteger(config, "maxReferenceVideos", "maxRefVideos");
         Integer maxReferenceAudios = getInteger(config, "maxReferenceAudios", "maxRefAudios");
+        Integer minDuration = getInteger(config, "minDuration", "minimumDuration");
+        Integer maxDuration = getInteger(config, "maxDuration", "maximumDuration");
 
         boolean finalSupportsFirstFrame = supportsFirstFrame != null
                 ? supportsFirstFrame : inferred.supportsFirstFrame();
@@ -100,6 +106,10 @@ public class GenerationModelCapabilityService {
         Integer finalMaxReferenceImages = mergeNullableMax(maxReferenceImages, inferred.maxReferenceImages());
         Integer finalMaxReferenceVideos = mergeNullableMax(maxReferenceVideos, inferred.maxReferenceVideos());
         Integer finalMaxReferenceAudios = mergeNullableMax(maxReferenceAudios, inferred.maxReferenceAudios());
+        Integer finalMinDuration = minDuration != null
+                ? Integer.valueOf(Math.max(minDuration, 0)) : inferred.minDuration();
+        Integer finalMaxDuration = maxDuration != null
+                ? Integer.valueOf(Math.max(maxDuration, 0)) : inferred.maxDuration();
 
         if (!finalSupportsReferenceImages) {
             finalMaxReferenceImages = 0;
@@ -121,7 +131,9 @@ public class GenerationModelCapabilityService {
                 finalMaxImageInputs,
                 finalMaxReferenceImages,
                 finalMaxReferenceVideos,
-                finalMaxReferenceAudios
+                finalMaxReferenceAudios,
+                finalMinDuration,
+                finalMaxDuration
         );
     }
 
@@ -167,7 +179,20 @@ public class GenerationModelCapabilityService {
         List<String> referenceAudios = parseJsonUrls(task.getReferenceAudioUrls());
         boolean hasFirstFrame = StrUtil.isNotBlank(task.getFirstFrameImageUrl());
         boolean hasLastFrame = StrUtil.isNotBlank(task.getLastFrameImageUrl());
+        boolean hasReferenceMedia = !referenceImages.isEmpty()
+                || !referenceVideos.isEmpty()
+                || !referenceAudios.isEmpty();
         int totalImageInputs = referenceImages.size() + (hasFirstFrame ? 1 : 0) + (hasLastFrame ? 1 : 0);
+
+        if (hasLastFrame && !hasFirstFrame) {
+            throw new BusinessException("尾帧图必须和首帧图一起使用，请同时传 firstFrameImageUrl，"
+                    + "或删除 lastFrameImageUrl。");
+        }
+        if ((hasFirstFrame || hasLastFrame) && hasReferenceMedia) {
+            throw new BusinessException("首尾帧模式不能同时传 referenceImageUrls、referenceVideoUrls "
+                    + "或 referenceAudioUrls。请先用参考素材生成关键帧，再只用 firstFrameImageUrl/lastFrameImageUrl 生成视频。");
+        }
+        validateDuration(model, task, capability);
 
         if (hasFirstFrame && !capability.supportsFirstFrame()) {
             throw new BusinessException("当前视频模型 " + modelLabel(model)
@@ -192,7 +217,8 @@ public class GenerationModelCapabilityService {
 
         if (capability.minImageInputs() > 0 && totalImageInputs < capability.minImageInputs()) {
             throw new BusinessException("当前视频模型 " + modelLabel(model)
-                    + " 至少需要 " + capability.minImageInputs() + " 张图片输入，请传 firstFrameImageUrl、lastFrameImageUrl 或 referenceImageUrls。");
+                    + " 至少需要 " + capability.minImageInputs()
+                    + " 张图片输入，请传 firstFrameImageUrl、lastFrameImageUrl 或 referenceImageUrls。");
         }
         if (capability.maxImageInputs() != null && totalImageInputs > capability.maxImageInputs()) {
             throw new BusinessException("当前视频模型 " + modelLabel(model)
@@ -200,15 +226,18 @@ public class GenerationModelCapabilityService {
         }
         if (capability.maxReferenceImages() != null && referenceImages.size() > capability.maxReferenceImages()) {
             throw new BusinessException("当前视频模型 " + modelLabel(model)
-                    + " 最多支持 " + capability.maxReferenceImages() + " 张 referenceImageUrls，当前传入了 " + referenceImages.size() + " 张。");
+                    + " 最多支持 " + capability.maxReferenceImages()
+                    + " 张 referenceImageUrls，当前传入了 " + referenceImages.size() + " 张。");
         }
         if (capability.maxReferenceVideos() != null && referenceVideos.size() > capability.maxReferenceVideos()) {
             throw new BusinessException("当前视频模型 " + modelLabel(model)
-                    + " 最多支持 " + capability.maxReferenceVideos() + " 个 referenceVideoUrls，当前传入了 " + referenceVideos.size() + " 个。");
+                    + " 最多支持 " + capability.maxReferenceVideos()
+                    + " 个 referenceVideoUrls，当前传入了 " + referenceVideos.size() + " 个。");
         }
         if (capability.maxReferenceAudios() != null && referenceAudios.size() > capability.maxReferenceAudios()) {
             throw new BusinessException("当前视频模型 " + modelLabel(model)
-                    + " 最多支持 " + capability.maxReferenceAudios() + " 个 referenceAudioUrls，当前传入了 " + referenceAudios.size() + " 个。");
+                    + " 最多支持 " + capability.maxReferenceAudios()
+                    + " 个 referenceAudioUrls，当前传入了 " + referenceAudios.size() + " 个。");
         }
     }
 
@@ -268,9 +297,22 @@ public class GenerationModelCapabilityService {
         parts.add("当前默认视频模型：" + modelLabel(model));
         parts.add("首帧图：" + yesNo(capability.supportsFirstFrame()));
         parts.add("尾帧图：" + yesNo(capability.supportsLastFrame()));
-        parts.add("参考图：" + referenceSupportText(capability.supportsReferenceImages(), capability.maxReferenceImages(), "张"));
-        parts.add("参考视频：" + referenceSupportText(capability.supportsReferenceVideos(), capability.maxReferenceVideos(), "个"));
-        parts.add("参考音频：" + referenceSupportText(capability.supportsReferenceAudios(), capability.maxReferenceAudios(), "个"));
+        parts.add("参考图：" + referenceSupportText(
+                capability.supportsReferenceImages(),
+                capability.maxReferenceImages(),
+                "张"));
+        parts.add("参考视频：" + referenceSupportText(
+                capability.supportsReferenceVideos(),
+                capability.maxReferenceVideos(),
+                "个"));
+        parts.add("参考音频：" + referenceSupportText(
+                capability.supportsReferenceAudios(),
+                capability.maxReferenceAudios(),
+                "个"));
+        String durationText = durationSupportText(capability.minDuration(), capability.maxDuration());
+        if (StrUtil.isNotBlank(durationText)) {
+            parts.add(durationText);
+        }
         if (capability.minImageInputs() > 0) {
             parts.add("至少需要 " + capability.minImageInputs() + " 张图片输入");
         }
@@ -308,10 +350,10 @@ public class GenerationModelCapabilityService {
                 .set("maxReferenceImages", capability.maxReferenceImages())
                 .set("maxReferenceVideos", capability.maxReferenceVideos())
                 .set("maxReferenceAudios", capability.maxReferenceAudios())
+                .set("minDuration", capability.minDuration())
+                .set("maxDuration", capability.maxDuration())
                 .set("supportedAspectRatios", getStringList(config, "supportedAspectRatios"))
                 .set("supportedResolutions", getStringList(config, "supportedResolutions"))
-                .set("minDuration", getInteger(config, "minDuration"))
-                .set("maxDuration", getInteger(config, "maxDuration"))
                 .set("defaultDuration", getInteger(config, "defaultDuration"))
                 .set("supportCameraFixed", getBoolean(config, "supportCameraFixed"))
                 .set("summary", describeVideoCapability(model));
@@ -360,84 +402,84 @@ public class GenerationModelCapabilityService {
         if ("googleflowreverseapi".equals(normalizedPlatform)) {
             if (code.contains("r2v")) {
                 return new VideoModelCapability(false, false, true, false, false,
-                        0, 3, 3, 0, 0);
+                        0, 3, 3, 0, 0, null, null);
             }
             if (code.contains("interpolation")) {
                 return new VideoModelCapability(true, true, false, false, false,
-                        2, 2, 0, 0, 0);
+                        2, 2, 0, 0, 0, null, null);
             }
             if (code.contains("i2v")) {
                 boolean lite = code.contains("lite");
                 return new VideoModelCapability(true, !lite, false, false, false,
-                        1, lite ? 1 : 2, 0, 0, 0);
+                        1, lite ? 1 : 2, 0, 0, 0, null, null);
             }
             return new VideoModelCapability(false, false, false, false, false,
-                    0, 0, 0, 0, 0);
+                    0, 0, 0, 0, 0, null, null);
         }
 
         if ("volcengine".equals(normalizedPlatform)) {
             if (code.contains("seedance-2-0")) {
                 return new VideoModelCapability(true, true, true, true, true,
-                        0, null, 9, 3, 3);
+                        0, null, 9, 3, 3, 4, 15);
             }
             if (code.contains("1-0-lite-t2v")) {
                 return new VideoModelCapability(false, false, false, false, false,
-                        0, 0, 0, 0, 0);
+                        0, 0, 0, 0, 0, 2, 12);
             }
             if (code.contains("1-0-lite-i2v")) {
                 return new VideoModelCapability(true, true, true, false, false,
-                        0, null, 9, 0, 0);
+                        0, null, 9, 0, 0, 2, 12);
             }
             if (code.contains("1-0-pro-fast")) {
                 return new VideoModelCapability(true, false, false, false, false,
-                        0, 1, 0, 0, 0);
+                        0, 1, 0, 0, 0, 2, 12);
             }
             if (code.contains("1-5-pro") || code.contains("1-0-pro")) {
                 return new VideoModelCapability(true, true, false, false, false,
-                        0, 2, 0, 0, 0);
+                        0, 2, 0, 0, 0, code.contains("1-5-pro") ? 4 : 2, 12);
             }
         }
 
         if ("dashscope".equals(normalizedPlatform)) {
             if (code.contains("wan2.7-r2v")) {
                 return new VideoModelCapability(false, false, true, true, true,
-                        0, 10, 10, 3, 3);
+                        0, 10, 10, 3, 3, null, null);
             }
             if (code.contains("wan2.7-videoedit")) {
                 return new VideoModelCapability(false, false, true, true, false,
-                        0, 3, 3, 1, 0);
+                        0, 3, 3, 1, 0, null, null);
             }
             if (code.contains("wan2.7-i2v")) {
                 return new VideoModelCapability(true, true, false, true, true,
-                        1, 2, 0, 1, 1);
+                        1, 2, 0, 1, 1, null, null);
             }
             if (code.contains("kf2v")) {
                 return new VideoModelCapability(true, true, false, false, false,
-                        2, 2, 0, 0, 0);
+                        2, 2, 0, 0, 0, null, null);
             }
             if (code.contains("i2v")) {
                 return new VideoModelCapability(true, false, false, false, true,
-                        1, 1, 0, 0, 1);
+                        1, 1, 0, 0, 1, null, null);
             }
             if (code.contains("t2v")) {
                 return new VideoModelCapability(false, false, false, false, true,
-                        0, 0, 0, 0, 1);
+                        0, 0, 0, 0, 1, null, null);
             }
         }
 
         if ("newapi".equals(normalizedPlatform)) {
             return new VideoModelCapability(true, false, true, false, false,
-                    0, 1, 1, 0, 0);
+                    0, 1, 1, 0, 0, null, null);
         }
 
         if ("openai_compatible".equals(normalizedPlatform)
             && ("agnes".equals(metadata.effectiveProtocol()) || "agnes".equals(metadata.effectiveFamily()))) {
             return new VideoModelCapability(true, true, true, false, false,
-                0, null, null, 0, 0);
+                0, null, null, 0, 0, null, null);
         }
 
         return new VideoModelCapability(false, false, false, false, false,
-                0, 0, 0, 0, 0);
+                0, 0, 0, 0, 0, null, null);
     }
 
     private JSONObject parseConfig(String configJson) {
@@ -560,6 +602,24 @@ public class GenerationModelCapabilityService {
         return inferredValue;
     }
 
+    private void validateDuration(AiModel model, VideoTask task, VideoModelCapability capability) {
+        Integer duration = task.getDuration();
+        if (duration == null) {
+            return;
+        }
+        if (duration <= 0) {
+            throw new BusinessException("视频时长必须为正整数秒，当前传入 " + duration + "。");
+        }
+        if (capability.minDuration() != null && duration < capability.minDuration()) {
+            throw new BusinessException("当前视频模型 " + modelLabel(model)
+                    + " 最短支持 " + capability.minDuration() + " 秒视频，当前传入 " + duration + " 秒。");
+        }
+        if (capability.maxDuration() != null && duration > capability.maxDuration()) {
+            throw new BusinessException("当前视频模型 " + modelLabel(model)
+                    + " 最长支持 " + capability.maxDuration() + " 秒视频，当前传入 " + duration + " 秒。");
+        }
+    }
+
     private List<String> parseJsonUrls(String json) {
         if (StrUtil.isBlank(json)) {
             return List.of();
@@ -589,6 +649,19 @@ public class GenerationModelCapabilityService {
         return "支持";
     }
 
+    private String durationSupportText(Integer minDuration, Integer maxDuration) {
+        if (minDuration != null && maxDuration != null) {
+            return "时长：" + minDuration + "-" + maxDuration + " 秒";
+        }
+        if (minDuration != null) {
+            return "时长：至少 " + minDuration + " 秒";
+        }
+        if (maxDuration != null) {
+            return "时长：最多 " + maxDuration + " 秒";
+        }
+        return null;
+    }
+
     public record ImageModelCapability(boolean supportsReferenceImages,
                                        int minReferenceImages,
                                        Integer maxReferenceImages) {
@@ -603,6 +676,8 @@ public class GenerationModelCapabilityService {
                                        Integer maxImageInputs,
                                        Integer maxReferenceImages,
                                        Integer maxReferenceVideos,
-                                       Integer maxReferenceAudios) {
+                                       Integer maxReferenceAudios,
+                                       Integer minDuration,
+                                       Integer maxDuration) {
     }
 }

@@ -15,10 +15,12 @@
    - `supportsLastFrame=false`：不传 `lastFrameImageUrl`，在 prompt 中描述结尾状态。
    - `supportsReferenceImages=false`：不传 `referenceImageUrls`，在 prompt 中详述角色/场景/道具外观特征。
    - `supportsReferenceVideos/Audios=false`：不传对应字段。禁止对不支持的参数做重复重试。
+   - 若能力结果包含 `minDuration/maxDuration`，`duration` 必须落在该范围内；不要传低于最小时长的镜头秒数。
 6. **调用生成与更新**：
    - 首帧图只读取目标镜头的 `firstFrameImageUrl`；为空或模型不支持首帧时，不传 `firstFrameImageUrl`。
    - 尾帧图只读取目标镜头的 `lastFrameImageUrl`；仅当 `firstFrameImageUrl` 存在、模型支持首帧且支持尾帧时，才传 `lastFrameImageUrl`。
    - 只有尾帧没有首帧时，不传 `lastFrameImageUrl`，也不要把尾帧放入 `referenceImageUrls`。
+   - 只要传 `firstFrameImageUrl` 或 `lastFrameImageUrl`，本次就是首尾帧/首帧模式，禁止传 `referenceImageUrls`、`referenceVideoUrls`、`referenceAudioUrls`；角色/道具/场景一致性应已体现在首帧和尾帧图片里。
    - 不要把 `imageUrl`、`generatedImageUrl`、`referenceImageUrl` 当作运行时首帧来源。
    - 调用 `generate_video(prompt, firstFrameImageUrl, lastFrameImageUrl, referenceImageUrls, ratio, duration)`（默认比例 16:9，duration 直接传）。
    - 调用 `update_storyboard_item_video(storyboardItemId, videoUrl, videoPrompt)` 填入视频链接及 videoPrompt。
@@ -30,7 +32,7 @@
 ### A. 参考图引用
 - **有风格参考图**：其放在 `referenceImageUrls` 数组的第 1 位（prompt 最开头引用：`仅参考图片1的画面风格，绝不参考其中的任何物品和构图，`）。资产参考图从第 2 位起排（图片2、图片3...）。
 - **无风格参考图**：资产参考图从第 1 位起排（图片1、图片2...）。
-- **禁止混用**：首帧使用 `firstFrameImageUrl`，尾帧使用 `lastFrameImageUrl`，不得把首尾帧图片加入 `referenceImageUrls`。
+- **禁止混用**：首帧使用 `firstFrameImageUrl`，尾帧使用 `lastFrameImageUrl`；只要传首帧或尾帧，就不要传任何 `referenceImageUrls`。
 - **注意**：数组顺序必须与 prompt 中 `图片N` 编号严格一致。
 
 ### B. 对白识别与引用

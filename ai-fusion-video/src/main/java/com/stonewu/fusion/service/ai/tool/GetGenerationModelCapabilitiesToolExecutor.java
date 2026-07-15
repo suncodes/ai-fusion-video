@@ -12,7 +12,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 查询当前默认生图/生视频模型能力。
@@ -45,7 +46,8 @@ public class GetGenerationModelCapabilitiesToolExecutor implements ToolExecutor 
 
                 使用时机：
                 - 在调用 generate_image 前，先确认当前默认图片模型是否支持 imageUrls
-                - 在调用 generate_video 前，先确认当前默认视频模型是否支持 firstFrameImageUrl、lastFrameImageUrl、referenceImageUrls、referenceVideoUrls、referenceAudioUrls
+                - 在调用 generate_video 前，先确认当前默认视频模型是否支持 firstFrameImageUrl、lastFrameImageUrl、
+                  referenceImageUrls、referenceVideoUrls、referenceAudioUrls
                 - 当你不确定默认模型能否使用参考图、首尾帧、多模态参考时，优先调用本工具，避免无意义重试
 
                 默认返回图片和视频两类能力；也可以只查询 image 或 video。
@@ -132,25 +134,33 @@ public class GetGenerationModelCapabilitiesToolExecutor implements ToolExecutor 
         boolean supportsReferenceImages = snapshot.getBool("supportsReferenceImages", false);
         boolean supportsReferenceVideos = snapshot.getBool("supportsReferenceVideos", false);
         boolean supportsReferenceAudios = snapshot.getBool("supportsReferenceAudios", false);
+        Integer minDuration = snapshot.getInt("minDuration");
+        Integer maxDuration = snapshot.getInt("maxDuration");
 
         snapshot.set("selectionSource", resolvedModel.selectionSource());
         snapshot.set("toolGuidance", buildVideoGuidance(
                 supportsFirstFrame,
                 supportsReferenceImages,
                 supportsReferenceVideos,
-                supportsReferenceAudios));
+                supportsReferenceAudios,
+                minDuration,
+                maxDuration));
         return snapshot;
     }
 
     private String buildVideoGuidance(boolean supportsFirstFrame,
-                                      boolean supportsReferenceImages,
-                                      boolean supportsReferenceVideos,
-                                      boolean supportsReferenceAudios) {
+                                       boolean supportsReferenceImages,
+                                       boolean supportsReferenceVideos,
+                                       boolean supportsReferenceAudios,
+                                       Integer minDuration,
+                                       Integer maxDuration) {
         List<String> hints = new ArrayList<>();
         hints.add(supportsFirstFrame
                 ? "可以传 firstFrameImageUrl 锁定开场画面。"
                 : "不要传 firstFrameImageUrl，改为在 prompt 中完整描述静态画面。"
         );
+        hints.add("如果传 firstFrameImageUrl 或 lastFrameImageUrl，"
+                + "不要再传 referenceImageUrls、referenceVideoUrls 或 referenceAudioUrls。");
         hints.add(supportsReferenceImages
                 ? "可以传 referenceImageUrls，用 图片1、图片2 等在 prompt 中引用。"
                 : "不要传 referenceImageUrls，改为在 prompt 中文字描述角色、场景和道具特征。"
@@ -160,6 +170,13 @@ public class GetGenerationModelCapabilitiesToolExecutor implements ToolExecutor 
         }
         if (!supportsReferenceAudios) {
             hints.add("不要传 referenceAudioUrls。");
+        }
+        if (minDuration != null && maxDuration != null) {
+            hints.add("duration 必须在 " + minDuration + "-" + maxDuration + " 秒之间。");
+        } else if (minDuration != null) {
+            hints.add("duration 必须不小于 " + minDuration + " 秒。");
+        } else if (maxDuration != null) {
+            hints.add("duration 必须不大于 " + maxDuration + " 秒。");
         }
         return String.join(" ", hints);
     }

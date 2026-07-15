@@ -6,6 +6,7 @@ import com.stonewu.fusion.entity.ai.AiModel;
 import com.stonewu.fusion.service.ai.AiModelService;
 import com.stonewu.fusion.service.ai.ModelPresetService;
 import com.stonewu.fusion.service.ai.ToolExecutionContext;
+import com.stonewu.fusion.service.ai.model.AiModelMetadataResolver;
 import com.stonewu.fusion.service.generation.GenerationModelCapabilityService;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +21,8 @@ class GetGenerationModelCapabilitiesToolExecutorTests {
     @Test
     void shouldReturnImageAndVideoCapabilitiesForCurrentDefaults() {
         AiModelService aiModelService = mock(AiModelService.class);
-        GenerationModelCapabilityService capabilityService = new GenerationModelCapabilityService(null, new ModelPresetService() {
+        GenerationModelCapabilityService capabilityService = new GenerationModelCapabilityService(
+                new AiModelMetadataResolver(null), new ModelPresetService() {
             @Override
             public String getPresetConfig(String code) {
                 return switch (code) {
@@ -73,7 +75,8 @@ class GetGenerationModelCapabilitiesToolExecutorTests {
     @Test
     void shouldSupportSingleModelTypeQuery() {
         AiModelService aiModelService = mock(AiModelService.class);
-        GenerationModelCapabilityService capabilityService = new GenerationModelCapabilityService(null, new ModelPresetService());
+        GenerationModelCapabilityService capabilityService =
+                new GenerationModelCapabilityService(new AiModelMetadataResolver(null), new ModelPresetService());
 
         AiModel imageModel = AiModel.builder().id(11L).name("GPT Image 1").code("gpt-image-1")
                 .config("{\"supportReferenceImages\":false,\"maxReferenceImages\":0}")
@@ -83,7 +86,8 @@ class GetGenerationModelCapabilitiesToolExecutorTests {
         GetGenerationModelCapabilitiesToolExecutor executor =
                 new GetGenerationModelCapabilitiesToolExecutor(aiModelService, capabilityService);
 
-        String result = executor.execute("{\"modelType\":\"image\"}", ToolExecutionContext.builder().userId(1L).build());
+        ToolExecutionContext context = ToolExecutionContext.builder().userId(1L).build();
+        String result = executor.execute("{\"modelType\":\"image\"}", context);
         JSONObject json = JSONUtil.parseObj(result);
 
         assertEquals("image", json.getStr("requestedModelType"));

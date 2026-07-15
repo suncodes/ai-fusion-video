@@ -57,7 +57,7 @@ public class GenerateVideoToolExecutor implements ToolExecutor {
     @Override
     public String getToolDescription() {
         return """
-                生成AI视频。根据提示词和可选的参考图片生成视频片段。
+                生成AI视频。根据提示词和可选的首帧、尾帧或参考素材生成视频片段。
 
                 适用场景：
                 1. 为分镜镜头生成视频：根据画面描述、运镜指令和参考首帧图生成视频
@@ -70,6 +70,9 @@ public class GenerateVideoToolExecutor implements ToolExecutor {
                 - 提供 referenceImageUrls 可锁定角色形象、道具外观等（Seedance 2.0 多模态参考特性）
                 - 提供 referenceVideoUrls 可参考视频的动作、运镜、特效等
                 - 提供 referenceAudioUrls 可参考音色、音乐旋律、对话内容等
+                - firstFrameImageUrl/lastFrameImageUrl 与 referenceImageUrls/referenceVideoUrls/referenceAudioUrls 不能混用
+                - 有首帧或尾帧时只走首尾帧模式
+                - 只有 lastFrameImageUrl 没有 firstFrameImageUrl 是非法输入
                 - 使用多模态参考时，提示词中用`图片1`/`视频1`/`音频1`等指代对应的参考素材
                 - 生成耗时较长（通常 1-5 分钟），请耐心等待
                 - 如果你打算传首帧、尾帧、参考图、参考视频或参考音频，或不确定当前默认模型是否支持这些字段，请先调用 get_generation_model_capabilities
@@ -93,13 +96,14 @@ public class GenerateVideoToolExecutor implements ToolExecutor {
                 : "尾帧参考图片URL（可选）";
             String referenceImageDescription = capability != null && !capability.supportsReferenceImages()
                 ? "当前默认模型不支持 referenceImageUrls，请不要传该字段"
-                : "多模态参考图片URL列表，用于锁定角色形象、道具外观、场景参考等";
+                : "多模态参考图片URL列表，用于锁定角色形象、道具外观、场景参考等；不要与首帧或尾帧同时传";
             String referenceVideoDescription = capability != null && !capability.supportsReferenceVideos()
                 ? "当前默认模型不支持 referenceVideoUrls，请不要传该字段"
-                : "参考视频URL列表，用于参考动作表现、运镜方式、特效风格等";
+                : "参考视频URL列表，用于参考动作表现、运镜方式、特效风格等；不要与首帧或尾帧同时传";
             String referenceAudioDescription = capability != null && !capability.supportsReferenceAudios()
                 ? "当前默认模型不支持 referenceAudioUrls，请不要传该字段"
-                : "参考音频URL列表，用于参考音色、音乐旋律、对话内容等";
+                : "参考音频URL列表，用于参考音色、音乐旋律、对话内容等；不要与首帧或尾帧同时传";
+            String durationDescription = buildDurationDescription(capability);
 
             return JSONUtil.createObj()
                 .set("type", "object")
@@ -130,7 +134,7 @@ public class GenerateVideoToolExecutor implements ToolExecutor {
                         .set("description", "画面比例，如 16:9、9:16、1:1（默认 16:9）"))
                     .set("duration", JSONUtil.createObj()
                         .set("type", "integer")
-                        .set("description", "视频时长（秒），默认 5"))
+                        .set("description", durationDescription))
                     .set("cameraFixed", JSONUtil.createObj()
                         .set("type", "boolean")
                         .set("description", "是否固定镜头（不做运动），默认 false")))
@@ -177,6 +181,17 @@ public class GenerateVideoToolExecutor implements ToolExecutor {
 
             // 解析参考音频列表
             String referenceAudioUrls = parseUrlArray(params, "referenceAudioUrls");
+            boolean hasFrameControl = StrUtil.isNotBlank(firstFrameImageUrl) || StrUtil.isNotBlank(lastFrameImageUrl);
+            int droppedReferenceImageCount = referenceImageUrlList.size();
+            boolean droppedReferenceMedia = hasFrameControl
+                    && (droppedReferenceImageCount > 0
+                    || StrUtil.isNotBlank(referenceVideoUrls)
+                    || StrUtil.isNotBlank(referenceAudioUrls));
+            if (hasFrameControl) {
+                referenceImageUrls = null;
+                referenceVideoUrls = null;
+                referenceAudioUrls = null;
+            }
 
             // 确定生成模式
             String generateMode = StrUtil.isNotBlank(firstFrameImageUrl) ? "image2video" : "text2video";
@@ -202,10 +217,12 @@ public class GenerateVideoToolExecutor implements ToolExecutor {
 
                     generationModelCapabilityService.validateVideoTask(model, task);
 
-                    log.info("[generate_video] 提交生视频任务: prompt={}, mode={}, ratio={}, duration={}s, modelId={}, modelCode={}, 首帧: {}, 参考图: {}张",
+                    log.info("[generate_video] 提交生视频任务: prompt={}, mode={}, ratio={}, duration={}s, modelId={}, "
+                                    + "modelCode={}, 首帧: {}, 尾帧: {}, 参考媒体裁剪: {}",
                         StrUtil.sub(prompt, 0, 80), generateMode, ratio, duration, model.getId(), model.getCode(),
-                    firstFrameImageUrl != null ? "有" : "无",
-                    referenceImageUrlList.size());
+                    StrUtil.isNotBlank(firstFrameImageUrl) ? "有" : "无",
+                    StrUtil.isNotBlank(lastFrameImageUrl) ? "有" : "无",
+                    droppedReferenceMedia ? "是" : "否");
 
             // 提交到队列并同步等待结果
             VideoTask completed = videoGenerationConsumer.submitAndWait(task, WAIT_TIMEOUT_MS);
@@ -271,6 +288,24 @@ public class GenerateVideoToolExecutor implements ToolExecutor {
 
     private String errorResult(String message) {
         return JSONUtil.createObj().set("status", "error").set("message", message).toString();
+    }
+
+    private String buildDurationDescription(GenerationModelCapabilityService.VideoModelCapability capability) {
+        if (capability == null) {
+            return "视频时长（秒），默认 5";
+        }
+        Integer minDuration = capability.minDuration();
+        Integer maxDuration = capability.maxDuration();
+        if (minDuration != null && maxDuration != null) {
+            return "视频时长（秒），当前默认模型支持 " + minDuration + "-" + maxDuration + " 秒，默认 5";
+        }
+        if (minDuration != null) {
+            return "视频时长（秒），当前默认模型至少 " + minDuration + " 秒，默认 5";
+        }
+        if (maxDuration != null) {
+            return "视频时长（秒），当前默认模型最多 " + maxDuration + " 秒，默认 5";
+        }
+        return "视频时长（秒），默认 5";
     }
 
     /**

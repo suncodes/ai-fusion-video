@@ -6,6 +6,7 @@ import com.stonewu.fusion.entity.ai.AiModel;
 import com.stonewu.fusion.entity.generation.ImageTask;
 import com.stonewu.fusion.entity.generation.VideoTask;
 import com.stonewu.fusion.service.ai.ModelPresetService;
+import com.stonewu.fusion.service.ai.model.AiModelMetadataResolver;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -17,14 +18,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GenerationModelCapabilityServiceTests {
 
-                private final ModelPresetService presetService = createPresetService();
-                private final GenerationModelCapabilityService service = new GenerationModelCapabilityService(null, presetService);
+    private final ModelPresetService presetService = createPresetService();
+    private final GenerationModelCapabilityService service =
+            new GenerationModelCapabilityService(new AiModelMetadataResolver(null), presetService);
 
-        private static ModelPresetService createPresetService() {
-                ModelPresetService presetService = new ModelPresetService();
-                presetService.init();
-                return presetService;
-        }
+    private static ModelPresetService createPresetService() {
+        ModelPresetService presetService = new ModelPresetService();
+        presetService.init();
+        return presetService;
+    }
 
     @Test
     void shouldUsePresetReferenceImageCapabilityForSupportedOpenAiImageModels() {
@@ -36,7 +38,8 @@ class GenerationModelCapabilityServiceTests {
                     .code(modelCode)
                     .build();
 
-            GenerationModelCapabilityService.ImageModelCapability capability = service.resolveImageCapability(model, "openai");
+            GenerationModelCapabilityService.ImageModelCapability capability =
+                    service.resolveImageCapability(model, "openai");
 
             assertTrue(capability.supportsReferenceImages(), modelCode);
             assertEquals(0, capability.minReferenceImages(), modelCode);
@@ -114,7 +117,8 @@ class GenerationModelCapabilityServiceTests {
 
     @Test
     void shouldUsePresetCapabilityWhenModelConfigDoesNotContainNewFields() {
-        GenerationModelCapabilityService serviceWithPreset = new GenerationModelCapabilityService(null, new ModelPresetService() {
+        GenerationModelCapabilityService serviceWithPreset = new GenerationModelCapabilityService(
+                new AiModelMetadataResolver(null), new ModelPresetService() {
             @Override
             public String getPresetConfig(String code) {
                 if (!"doubao-seedream-3-0-t2i-250415".equals(code)) {
@@ -136,7 +140,8 @@ class GenerationModelCapabilityServiceTests {
                 .config("{\"defaultWidth\":2048,\"defaultHeight\":2048}")
                 .build();
 
-        GenerationModelCapabilityService.ImageModelCapability capability = serviceWithPreset.resolveImageCapability(model, "volcengine");
+        GenerationModelCapabilityService.ImageModelCapability capability =
+                serviceWithPreset.resolveImageCapability(model, "volcengine");
 
         assertFalse(capability.supportsReferenceImages());
         assertEquals(0, capability.maxReferenceImages());
@@ -181,6 +186,7 @@ class GenerationModelCapabilityServiceTests {
                 .code("doubao-seedance-1-0-pro-fast-251015")
                 .build();
         VideoTask task = VideoTask.builder()
+                .firstFrameImageUrl("https://example.com/first.png")
                 .lastFrameImageUrl("https://example.com/last.png")
                 .build();
 
@@ -191,7 +197,22 @@ class GenerationModelCapabilityServiceTests {
     }
 
     @Test
-    void shouldAllowSeedance20ReferenceMedia() {
+    void shouldAllowSeedance20ReferenceMediaWithoutFrames() {
+        AiModel model = AiModel.builder()
+                .name("Seedance 2.0")
+                .code("doubao-seedance-2-0-260128")
+                .build();
+        VideoTask task = VideoTask.builder()
+                .referenceImageUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref-1.png")))
+                .referenceVideoUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref-1.mp4")))
+                .referenceAudioUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref-1.mp3")))
+                .build();
+
+        service.validateVideoTask(model, task, "volcengine");
+    }
+
+    @Test
+    void shouldRejectSeedance20FramesMixedWithReferenceMedia() {
         AiModel model = AiModel.builder()
                 .name("Seedance 2.0")
                 .code("doubao-seedance-2-0-260128")
@@ -200,11 +221,46 @@ class GenerationModelCapabilityServiceTests {
                 .firstFrameImageUrl("https://example.com/first.png")
                 .lastFrameImageUrl("https://example.com/last.png")
                 .referenceImageUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref-1.png")))
-                .referenceVideoUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref-1.mp4")))
-                .referenceAudioUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref-1.mp3")))
                 .build();
 
-        service.validateVideoTask(model, task, "volcengine");
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> service.validateVideoTask(model, task, "volcengine"));
+
+        assertTrue(ex.getMessage().contains("首尾帧模式不能同时传"));
+    }
+
+    @Test
+    void shouldRejectLastFrameWithoutFirstFrame() {
+        AiModel model = AiModel.builder()
+                .name("Seedance 2.0")
+                .code("doubao-seedance-2-0-260128")
+                .build();
+        VideoTask task = VideoTask.builder()
+                .lastFrameImageUrl("https://example.com/last.png")
+                .build();
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> service.validateVideoTask(model, task, "volcengine"));
+
+        assertTrue(ex.getMessage().contains("尾帧图必须和首帧图一起使用"));
+    }
+
+    @Test
+    void shouldValidateSeedance20DurationRange() {
+        AiModel model = AiModel.builder()
+                .name("Seedance 2.0")
+                .code("doubao-seedance-2-0-260128")
+                .build();
+
+        BusinessException tooShort = assertThrows(BusinessException.class,
+                () -> service.validateVideoTask(model, VideoTask.builder().duration(3).build(), "volcengine"));
+        BusinessException tooLong = assertThrows(BusinessException.class,
+                () -> service.validateVideoTask(model, VideoTask.builder().duration(16).build(), "volcengine"));
+
+        assertTrue(tooShort.getMessage().contains("最短支持 4 秒"));
+        assertTrue(tooLong.getMessage().contains("最长支持 15 秒"));
+        service.validateVideoTask(model, VideoTask.builder().duration(4).build(), "volcengine");
+        service.validateVideoTask(model, VideoTask.builder().duration(15).build(), "volcengine");
     }
 
     @Test
@@ -217,7 +273,8 @@ class GenerationModelCapabilityServiceTests {
                 .refImageUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref.png")))
                 .build();
 
-        GenerationModelCapabilityService.ImageModelCapability capability = service.resolveImageCapability(model, "dashscope");
+        GenerationModelCapabilityService.ImageModelCapability capability =
+                service.resolveImageCapability(model, "dashscope");
 
         assertTrue(capability.supportsReferenceImages());
         service.validateImageTask(model, task, "dashscope");
@@ -235,7 +292,8 @@ class GenerationModelCapabilityServiceTests {
                         "https://example.com/ref-2.png")))
                 .build();
 
-        GenerationModelCapabilityService.ImageModelCapability capability = service.resolveImageCapability(model, "dashscope");
+        GenerationModelCapabilityService.ImageModelCapability capability =
+                service.resolveImageCapability(model, "dashscope");
 
         assertTrue(capability.supportsReferenceImages());
         assertEquals(2, capability.maxReferenceImages());
@@ -268,7 +326,8 @@ class GenerationModelCapabilityServiceTests {
                 .referenceAudioUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref.mp3")))
                 .build();
 
-        GenerationModelCapabilityService.VideoModelCapability capability = service.resolveVideoCapability(model, "dashscope");
+        GenerationModelCapabilityService.VideoModelCapability capability =
+                service.resolveVideoCapability(model, "dashscope");
 
         assertTrue(capability.supportsReferenceAudios());
         service.validateVideoTask(model, task, "dashscope");
@@ -285,7 +344,8 @@ class GenerationModelCapabilityServiceTests {
                 .lastFrameImageUrl("https://example.com/last.png")
                 .build();
 
-        GenerationModelCapabilityService.VideoModelCapability capability = service.resolveVideoCapability(model, "dashscope");
+        GenerationModelCapabilityService.VideoModelCapability capability =
+                service.resolveVideoCapability(model, "dashscope");
 
         assertTrue(capability.supportsFirstFrame());
         assertTrue(capability.supportsLastFrame());
@@ -318,7 +378,8 @@ class GenerationModelCapabilityServiceTests {
                 .referenceVideoUrls(JSONUtil.toJsonStr(List.of("https://example.com/ref.mp4")))
                 .build();
 
-        GenerationModelCapabilityService.VideoModelCapability capability = service.resolveVideoCapability(model, "dashscope");
+        GenerationModelCapabilityService.VideoModelCapability capability =
+                service.resolveVideoCapability(model, "dashscope");
 
         assertTrue(capability.supportsReferenceImages());
         assertTrue(capability.supportsReferenceVideos());

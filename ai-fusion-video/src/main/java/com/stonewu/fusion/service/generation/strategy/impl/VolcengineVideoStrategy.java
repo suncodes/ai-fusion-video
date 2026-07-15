@@ -165,10 +165,14 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
     // ========== 内部辅助方法 ==========
 
     /**
-     * 构建 Content 列表（文本提示词 + 参考图片 + 参考视频 + 参考音频）
+     * 构建 Content 列表。
+     * <p>
+     * Ark 约束：first_frame/last_frame 不能与 reference_image、reference_video、reference_audio 或 draft_task 混用。
      */
     private List<CreateContentGenerationTaskRequest.Content> buildContents(VideoTask task) {
         List<CreateContentGenerationTaskRequest.Content> contents = new ArrayList<>();
+        boolean hasFirstFrame = StrUtil.isNotBlank(task.getFirstFrameImageUrl());
+        boolean hasLastFrame = StrUtil.isNotBlank(task.getLastFrameImageUrl());
 
         // 1. 文本提示词（必须）
         if (StrUtil.isNotBlank(task.getPrompt())) {
@@ -178,8 +182,12 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
                     .build());
         }
 
-        // 2. 首帧参考图片（图生视频模式）
-        if (StrUtil.isNotBlank(task.getFirstFrameImageUrl())) {
+        if (hasLastFrame && !hasFirstFrame) {
+            throw new IllegalArgumentException("尾帧图必须和首帧图一起使用，请同时传 firstFrameImageUrl。");
+        }
+
+        // 2. 首尾帧模式：只提交 first_frame/last_frame，不提交任何 reference media。
+        if (hasLastFrame) {
             contents.add(CreateContentGenerationTaskRequest.Content.builder()
                     .type("image_url")
                     .imageUrl(CreateContentGenerationTaskRequest.ImageUrl.builder()
@@ -187,10 +195,6 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
                             .build())
                     .role("first_frame")
                     .build());
-        }
-
-        // 3. 尾帧参考图片
-        if (StrUtil.isNotBlank(task.getLastFrameImageUrl())) {
             contents.add(CreateContentGenerationTaskRequest.Content.builder()
                     .type("image_url")
                     .imageUrl(CreateContentGenerationTaskRequest.ImageUrl.builder()
@@ -198,9 +202,21 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
                             .build())
                     .role("last_frame")
                     .build());
+            return contents;
         }
 
-        // 4. 额外参考图片（多模态参考场景，最多 9 张）
+        // 3. 单首帧图生视频模式：按 Ark i2v 口径使用普通 image_url。
+        if (hasFirstFrame) {
+            contents.add(CreateContentGenerationTaskRequest.Content.builder()
+                    .type("image_url")
+                    .imageUrl(CreateContentGenerationTaskRequest.ImageUrl.builder()
+                            .url(task.getFirstFrameImageUrl())
+                            .build())
+                    .build());
+            return contents;
+        }
+
+        // 4. 多模态参考模式：无首尾帧时才提交 reference media。
         List<String> refImageUrls = parseJsonUrls(task.getReferenceImageUrls());
         if (refImageUrls != null) {
             for (String refUrl : refImageUrls) {
