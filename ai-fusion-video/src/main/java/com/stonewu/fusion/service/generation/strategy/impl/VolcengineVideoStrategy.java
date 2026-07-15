@@ -10,6 +10,7 @@ import com.stonewu.fusion.entity.generation.VideoTask;
 import com.stonewu.fusion.service.ai.AiModelService;
 import com.stonewu.fusion.service.ai.ApiConfigService;
 import com.stonewu.fusion.service.generation.VideoGenerationService;
+import com.stonewu.fusion.service.generation.media.GenerationMediaInputResolver;
 import com.stonewu.fusion.service.generation.strategy.VideoGenerationStrategy;
 import com.volcengine.ark.runtime.model.content.generation.CreateContentGenerationTaskRequest;
 import com.volcengine.ark.runtime.model.content.generation.CreateContentGenerationTaskResult;
@@ -52,6 +53,7 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
     private final AiModelService aiModelService;
     private final ApiConfigService apiConfigService;
     private final VideoGenerationService videoGenerationService;
+    private final GenerationMediaInputResolver mediaInputResolver;
 
     @Override
     public String getName() {
@@ -67,7 +69,7 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
         ArkService service = buildArkService(apiConfig);
         try {
             // 构建 content 列表
-            List<CreateContentGenerationTaskRequest.Content> contents = buildContents(task);
+            List<CreateContentGenerationTaskRequest.Content> contents = buildContents(task, apiConfig);
 
             // 构建创建任务请求
             CreateContentGenerationTaskRequest.Builder reqBuilder = CreateContentGenerationTaskRequest.builder()
@@ -169,7 +171,7 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
      * <p>
      * Ark 约束：first_frame/last_frame 不能与 reference_image、reference_video、reference_audio 或 draft_task 混用。
      */
-    private List<CreateContentGenerationTaskRequest.Content> buildContents(VideoTask task) {
+    private List<CreateContentGenerationTaskRequest.Content> buildContents(VideoTask task, ApiConfig apiConfig) {
         List<CreateContentGenerationTaskRequest.Content> contents = new ArrayList<>();
         boolean hasFirstFrame = StrUtil.isNotBlank(task.getFirstFrameImageUrl());
         boolean hasLastFrame = StrUtil.isNotBlank(task.getLastFrameImageUrl());
@@ -188,17 +190,21 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
 
         // 2. 首尾帧模式：只提交 first_frame/last_frame，不提交任何 reference media。
         if (hasLastFrame) {
+            String firstFrameDataUrl = mediaInputResolver.toImageDataUrl(
+                    task.getFirstFrameImageUrl(), apiConfig, "Volcengine 视频首帧图");
+            String lastFrameDataUrl = mediaInputResolver.toImageDataUrl(
+                    task.getLastFrameImageUrl(), apiConfig, "Volcengine 视频尾帧图");
             contents.add(CreateContentGenerationTaskRequest.Content.builder()
                     .type("image_url")
                     .imageUrl(CreateContentGenerationTaskRequest.ImageUrl.builder()
-                            .url(task.getFirstFrameImageUrl())
+                            .url(firstFrameDataUrl)
                             .build())
                     .role("first_frame")
                     .build());
             contents.add(CreateContentGenerationTaskRequest.Content.builder()
                     .type("image_url")
                     .imageUrl(CreateContentGenerationTaskRequest.ImageUrl.builder()
-                            .url(task.getLastFrameImageUrl())
+                            .url(lastFrameDataUrl)
                             .build())
                     .role("last_frame")
                     .build());
@@ -207,10 +213,12 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
 
         // 3. 单首帧图生视频模式：按 Ark i2v 口径使用普通 image_url。
         if (hasFirstFrame) {
+            String firstFrameDataUrl = mediaInputResolver.toImageDataUrl(
+                    task.getFirstFrameImageUrl(), apiConfig, "Volcengine 视频首帧图");
             contents.add(CreateContentGenerationTaskRequest.Content.builder()
                     .type("image_url")
                     .imageUrl(CreateContentGenerationTaskRequest.ImageUrl.builder()
-                            .url(task.getFirstFrameImageUrl())
+                            .url(firstFrameDataUrl)
                             .build())
                     .build());
             return contents;
@@ -219,7 +227,9 @@ public class VolcengineVideoStrategy implements VideoGenerationStrategy {
         // 4. 多模态参考模式：无首尾帧时才提交 reference media。
         List<String> refImageUrls = parseJsonUrls(task.getReferenceImageUrls());
         if (refImageUrls != null) {
-            for (String refUrl : refImageUrls) {
+            List<String> refImageDataUrls = mediaInputResolver.toImageDataUrls(
+                    refImageUrls, apiConfig, "Volcengine 视频参考图");
+            for (String refUrl : refImageDataUrls) {
                 contents.add(CreateContentGenerationTaskRequest.Content.builder()
                         .type("image_url")
                         .imageUrl(CreateContentGenerationTaskRequest.ImageUrl.builder()

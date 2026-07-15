@@ -7,6 +7,7 @@ import com.stonewu.fusion.entity.generation.ImageItem;
 import com.stonewu.fusion.entity.generation.ImageTask;
 import com.stonewu.fusion.service.ai.AiModelService;
 import com.stonewu.fusion.service.generation.ImageGenerationService;
+import com.stonewu.fusion.service.generation.media.GenerationMediaInputResolver;
 import com.stonewu.fusion.service.generation.strategy.ImageGenerationStrategy;
 import com.volcengine.ark.runtime.model.images.generation.GenerateImagesRequest;
 import com.volcengine.ark.runtime.model.images.generation.ImagesResponse;
@@ -30,6 +31,7 @@ public class VolcengineImageStrategy implements ImageGenerationStrategy {
 
     private final ImageGenerationService imageGenerationService;
     private final AiModelService aiModelService;
+    private final GenerationMediaInputResolver mediaInputResolver;
 
     @Override
     public String getName() {
@@ -52,9 +54,9 @@ public class VolcengineImageStrategy implements ImageGenerationStrategy {
                     .watermark(false)
                     .size(width + "x" + height);
 
-            // 图生图：传入参考图片 URL 列表
+            // 图生图：Ark 支持 Data URL，出站前先把业务媒体引用解析为图片内容。
             if (imageUrls != null && !imageUrls.isEmpty()) {
-                reqBuilder.image(imageUrls);
+                reqBuilder.image(mediaInputResolver.toImageDataUrls(imageUrls, apiConfig, "Volcengine 图片参考图"));
             }
 
             GenerateImagesRequest request = reqBuilder.build();
