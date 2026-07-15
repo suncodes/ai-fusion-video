@@ -36,13 +36,20 @@ import java.util.regex.Pattern;
 public class VersionCheckService {
 
     private static final String RELEASES_API_URL =
-            "https://api.github.com/repos/Stonewuu/ai-fusion-video/releases?per_page=10";
+            "https://api.github.com/repos/suncodes/ai-fusion-video/releases?per_page=10";
     private static final String RELEASES_PAGE_URL =
-            "https://github.com/Stonewuu/ai-fusion-video/releases";
-    private static final String DOCKER_HUB_TAG_API_TEMPLATE =
-            "https://hub.docker.com/v2/repositories/%s/tags/%s";
-    private static final String BACKEND_IMAGE_REPOSITORY = "stonewuu/ai-fusion-video";
-    private static final String FRONTEND_IMAGE_REPOSITORY = "stonewuu/ai-fusion-video-web";
+            "https://github.com/suncodes/ai-fusion-video/releases";
+    private static final String GHCR_MANIFEST_API_TEMPLATE =
+            "https://ghcr.io/v2/%s/manifests/%s";
+    private static final String GHCR_TOKEN_API_TEMPLATE =
+            "https://ghcr.io/token?service=ghcr.io&scope=%s";
+    private static final String GHCR_MANIFEST_ACCEPT = String.join(", ",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+            "application/vnd.docker.distribution.manifest.v2+json");
+    private static final String BACKEND_IMAGE_REPOSITORY = "suncodes/ai-fusion-video";
+    private static final String FRONTEND_IMAGE_REPOSITORY = "suncodes/ai-fusion-video-web";
     private static final Duration CACHE_TTL = Duration.ofHours(6);
     private static final Pattern SEMVER_PATTERN = Pattern.compile("(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?");
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -116,7 +123,7 @@ public class VersionCheckService {
         respVO.setTagUrl(deployableRelease != null ? deployableRelease.tagUrl() : RELEASES_PAGE_URL);
         respVO.setPublishedAt(deployableRelease != null ? deployableRelease.publishedAt() : null);
         respVO.setCheckedAt(latest.checkedAt().toString());
-        respVO.setSource("github-release+docker-hub");
+        respVO.setSource("github-release+ghcr");
         respVO.setCheckSucceeded(latest.checkSucceeded());
         respVO.setMessage(resolveMessage(runtimeVersionInfo, latest, versionRelation));
         return respVO;
@@ -228,7 +235,7 @@ public class VersionCheckService {
 
                 String releaseUrl = textOrNull(releaseNode, "html_url");
                 String publishedAt = textOrNull(releaseNode, "published_at");
-                boolean dockerReady = areDockerImagesReady(tagName);
+                boolean dockerReady = areGhcrImagesReady(tagName);
                 ReleaseInfo releaseInfo = new ReleaseInfo(
                         tagName,
                         hasText(releaseUrl) ? releaseUrl : buildTagUrl(tagName),
@@ -276,14 +283,68 @@ public class VersionCheckService {
         }
     }
 
-    private boolean areDockerImagesReady(String version) {
-        return dockerTagExists(BACKEND_IMAGE_REPOSITORY, version)
-                && dockerTagExists(FRONTEND_IMAGE_REPOSITORY, version);
+    private boolean areGhcrImagesReady(String version) {
+        return ghcrTagExists(BACKEND_IMAGE_REPOSITORY, version)
+                && ghcrTagExists(FRONTEND_IMAGE_REPOSITORY, version);
     }
 
-    private boolean dockerTagExists(String repository, String version) {
+    private boolean ghcrTagExists(String repository, String version) {
         String encodedVersion = URLEncoder.encode(version, StandardCharsets.UTF_8);
-        String url = String.format(DOCKER_HUB_TAG_API_TEMPLATE, repository, encodedVersion);
+        String url = String.format(GHCR_MANIFEST_API_TEMPLATE, repository, encodedVersion);
+
+        try (Response response = httpClient.newCall(buildGhcrManifestRequest(url, null)).execute()) {
+            if (response.isSuccessful()) {
+                return true;
+            }
+            int statusCode = response.code();
+            if (statusCode == 401) {
+                Integer retryStatusCode = retryGhcrManifestRequest(repository, url);
+                if (retryStatusCode != null) {
+                    if (retryStatusCode >= 200 && retryStatusCode < 300) {
+                        return true;
+                    }
+                    statusCode = retryStatusCode;
+                }
+            }
+            if (statusCode != 404) {
+                log.warn("[VersionCheck] GHCR 标签检测失败: repo={}, tag={}, code={}", repository, version,
+                        statusCode);
+            }
+            return false;
+        } catch (IOException e) {
+            log.warn("[VersionCheck] GHCR 标签检测异常: repo={}, tag={}, err={}", repository, version,
+                    e.getMessage());
+            return false;
+        }
+    }
+
+    private Request buildGhcrManifestRequest(String url, @Nullable String token) {
+        Request.Builder builder = new Request.Builder()
+                .url(url)
+                .head()
+                .header("Accept", GHCR_MANIFEST_ACCEPT)
+                .header("User-Agent", "ai-fusion-video-version-check");
+        if (hasText(token)) {
+            builder.header("Authorization", "Bearer " + token);
+        }
+        return builder.build();
+    }
+
+    @Nullable
+    private Integer retryGhcrManifestRequest(String repository, String url) throws IOException {
+        String token = fetchGhcrToken(repository);
+        if (!hasText(token)) {
+            return null;
+        }
+        try (Response response = httpClient.newCall(buildGhcrManifestRequest(url, token)).execute()) {
+            return response.code();
+        }
+    }
+
+    @Nullable
+    private String fetchGhcrToken(String repository) throws IOException {
+        String scope = URLEncoder.encode("repository:" + repository + ":pull", StandardCharsets.UTF_8);
+        String url = String.format(GHCR_TOKEN_API_TEMPLATE, scope);
         Request request = new Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
@@ -291,18 +352,13 @@ public class VersionCheckService {
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
-            if (response.isSuccessful()) {
-                return true;
+            if (!response.isSuccessful() || response.body() == null) {
+                log.warn("[VersionCheck] GHCR token 获取失败: repo={}, code={}", repository, response.code());
+                return null;
             }
-            if (response.code() != 404) {
-                log.warn("[VersionCheck] Docker Hub 标签检测失败: repo={}, tag={}, code={}", repository, version,
-                        response.code());
-            }
-            return false;
-        } catch (IOException e) {
-            log.warn("[VersionCheck] Docker Hub 标签检测异常: repo={}, tag={}, err={}", repository, version,
-                    e.getMessage());
-            return false;
+            JsonNode root = OBJECT_MAPPER.readTree(response.body().string());
+            String token = textOrNull(root, "token");
+            return hasText(token) ? token : textOrNull(root, "access_token");
         }
     }
 
@@ -402,7 +458,7 @@ public class VersionCheckService {
         if (!hasText(tagName)) {
             return RELEASES_PAGE_URL;
         }
-        return "https://github.com/Stonewuu/ai-fusion-video/releases/tag/v" + sanitizeVersion(tagName);
+        return "https://github.com/suncodes/ai-fusion-video/releases/tag/v" + sanitizeVersion(tagName);
     }
 
     private String textOrNull(JsonNode node, String fieldName) {
@@ -425,7 +481,11 @@ public class VersionCheckService {
             return checkedAt.plus(CACHE_TTL).isBefore(Instant.now());
         }
 
-        private static CachedVersionInfo success(ReleaseInfo latestRelease, ReleaseInfo deployableRelease, String message) {
+        private static CachedVersionInfo success(
+                ReleaseInfo latestRelease,
+                ReleaseInfo deployableRelease,
+                String message
+        ) {
             return new CachedVersionInfo(
                 latestRelease,
                 deployableRelease,

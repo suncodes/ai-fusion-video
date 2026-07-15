@@ -37,7 +37,7 @@ services:
 
   # ---------- 后端 ----------
   backend:
-    image: stonewuu/ai-fusion-video:latest
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-suncodes}/ai-fusion-video:${IMAGE_TAG:-latest}
     container_name: fusion-backend
     restart: unless-stopped
     environment:
@@ -62,7 +62,7 @@ services:
 
   # ---------- 前端 ----------
   frontend:
-    image: stonewuu/ai-fusion-video-web:latest
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-suncodes}/ai-fusion-video-web:${IMAGE_TAG:-latest}
     container_name: fusion-frontend
     restart: unless-stopped
     environment:
